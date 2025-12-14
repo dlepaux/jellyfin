@@ -53,6 +53,7 @@ namespace MediaBrowser.Controller.MediaEncoding
         private const string D3d11vaAlias = "dx11";
         private const string VideotoolboxAlias = "vt";
         private const string RkmppAlias = "rk";
+        private const string AxclAlias = "axcl";
         private const string OpenclAlias = "ocl";
         private const string CudaAlias = "cu";
         private const string DrmAlias = "dr";
@@ -210,6 +211,7 @@ namespace MediaBrowser.Controller.MediaEncoding
                     { HardwareAccelerationType.videotoolbox,         hwEncoder + "_videotoolbox" },
                     { HardwareAccelerationType.v4l2m2m,              hwEncoder + "_v4l2m2m" },
                     { HardwareAccelerationType.rkmpp,                hwEncoder + "_rkmpp" },
+                    { HardwareAccelerationType.axcl,                 hwEncoder + "_axenc" },
                 };
 
                 if (hwType != HardwareAccelerationType.none
@@ -281,6 +283,13 @@ namespace MediaBrowser.Controller.MediaEncoding
                    && _mediaEncoder.SupportsFilter("scale_rkrga")
                    && _mediaEncoder.SupportsFilter("vpp_rkrga")
                    && _mediaEncoder.SupportsFilter("overlay_rkrga");
+        }
+
+        private bool IsAxclFullSupported()
+        {
+            return _mediaEncoder.SupportsHwaccel("axmm")
+                   && _mediaEncoder.SupportsEncoder("h264_axenc")
+                   && _mediaEncoder.SupportsEncoder("hevc_axenc");
         }
 
         private bool IsOpenclFullSupported()
@@ -802,6 +811,14 @@ namespace MediaBrowser.Controller.MediaEncoding
             return " -init_hw_device rkmpp=" + alias;
         }
 
+        private string GetAxclDeviceArgs(string alias)
+        {
+            alias ??= AxclAlias;
+
+            // AXCL device path is fixed to /dev/axcl_host
+            return " -init_hw_device axmm=" + alias + ":/dev/axcl_host";
+        }
+
         private string GetVideoToolboxDeviceArgs(string alias)
         {
             alias ??= VideotoolboxAlias;
@@ -1197,6 +1214,23 @@ namespace MediaBrowser.Controller.MediaEncoding
                 }
 
                 args.Append(filterDevArgs);
+            }
+            else if (optHwaccelType == HardwareAccelerationType.axcl)
+            {
+                if (!isLinux || !_mediaEncoder.SupportsHwaccel("axmm"))
+                {
+                    return string.Empty;
+                }
+
+                var isAxclDecoder = vidDecoder.Contains("axdec", StringComparison.OrdinalIgnoreCase);
+                var isAxclEncoder = vidEncoder.Contains("axenc", StringComparison.OrdinalIgnoreCase);
+                if (!isAxclDecoder && !isAxclEncoder)
+                {
+                    return string.Empty;
+                }
+
+                args.Append(GetAxclDeviceArgs(AxclAlias));
+                args.Append(GetFilterHwDeviceArgs(AxclAlias));
             }
 
             if (!string.IsNullOrEmpty(vidDecoder))
@@ -2250,6 +2284,11 @@ namespace MediaBrowser.Controller.MediaEncoding
                 {
                     param += " -level " + level;
                 }
+                else if (string.Equals(videoEncoder, "h264_axenc", StringComparison.OrdinalIgnoreCase)
+                         || string.Equals(videoEncoder, "hevc_axenc", StringComparison.OrdinalIgnoreCase))
+                {
+                    param += " -level " + level;
+                }
                 else if (!string.Equals(videoEncoder, "libx265", StringComparison.OrdinalIgnoreCase))
                 {
                     param += " -level " + level;
@@ -2279,6 +2318,17 @@ namespace MediaBrowser.Controller.MediaEncoding
                 && _mediaEncoder.EncoderVersion >= _minFFmpegSvtAv1Params)
             {
                 param += " -svtav1-params:0 rc=1:tune=0:film-grain=0:enable-overlays=1:enable-tf=0";
+            }
+
+            // AXCL encoders use rate control modes instead of CRF
+            if (string.Equals(videoEncoder, "h264_axenc", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(videoEncoder, "hevc_axenc", StringComparison.OrdinalIgnoreCase))
+            {
+                // AXCL uses different parameters than x264/x265:
+                // - No CRF support, uses rate control modes: cbr, vbr, avbr, fixqp
+                // - No preset support (hardware-determined speed)
+                // - Quality control via -qaLevel (0-8, lower is better quality)
+                param += " -rc vbr -qaLevel 5";
             }
 
             /* Access unit too large: 8192 < 20880 error */
